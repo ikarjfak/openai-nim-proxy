@@ -146,7 +146,20 @@ app.get('/', (req, res) => {
     service: 'OpenAI to NVIDIA NIM Proxy',
     openai_base_url: `${req.protocol}://${req.get('host')}/v1`,
     endpoints: {
+      v1: '/v1',
       health: '/health',
+      models: '/v1/models',
+      chat_completions: '/v1/chat/completions'
+    }
+  });
+});
+
+app.get('/v1', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'OpenAI-compatible NVIDIA NIM Proxy',
+    message: 'Use /v1/models or /v1/chat/completions',
+    endpoints: {
       models: '/v1/models',
       chat_completions: '/v1/chat/completions'
     }
@@ -423,11 +436,12 @@ app.use((req, res) => {
       code: 404
     },
     available_endpoints: [
-      'GET /',
-      'GET /health',
-      'GET /v1/models',
-      'POST /v1/chat/completions'
-    ],
+  'GET /',
+  'GET /v1',
+  'GET /health',
+  'GET /v1/models',
+  'POST /v1/chat/completions'
+],
     openai_base_url: `${req.protocol}://${req.get('host')}/v1`
   });
 });
