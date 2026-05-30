@@ -8,7 +8,35 @@ const PORT = process.env.PORT || 3000;
 
 // Middleware
 app.use(cors());
-app.use(express.json());
+// Middleware
+app.use(cors());
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
+
+// JSON/body parser error handler
+app.use((err, req, res, next) => {
+  if (err.type === 'entity.too.large') {
+    return res.status(413).json({
+      error: {
+        message: 'Request body too large. Reduce the prompt/context size or increase server limits.',
+        type: 'invalid_request_error',
+        code: 413
+      }
+    });
+  }
+
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({
+      error: {
+        message: 'Invalid JSON body.',
+        type: 'invalid_request_error',
+        code: 400
+      }
+    });
+  }
+
+  next(err);
+});
 
 // NVIDIA NIM API configuration
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
