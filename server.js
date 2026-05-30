@@ -226,14 +226,43 @@ app.post('/v1/chat/completions', async (req, res) => {
   }
 });
 
+// Root endpoint
+app.get('/', (req, res) => {
+  res.json({
+    status: 'ok',
+    service: 'OpenAI to NVIDIA NIM Proxy',
+    endpoints: {
+      health: '/health',
+      models: '/v1/models',
+      chat_completions: '/v1/chat/completions'
+    },
+    openai_base_url: `${req.protocol}://${req.get('host')}/v1`
+  });
+});
+
+// Health check endpoint
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'ok', 
+    service: 'OpenAI to NVIDIA NIM Proxy', 
+    reasoning_display: SHOW_REASONING,
+    thinking_mode: ENABLE_THINKING_MODE
+  });
+});
 // Catch-all for unsupported endpoints
 app.all('*', (req, res) => {
   res.status(404).json({
     error: {
-      message: `Endpoint ${req.path} not found`,
+      message: `Endpoint ${req.method} ${req.path} not found`,
       type: 'invalid_request_error',
       code: 404
-    }
+    },
+    available_endpoints: [
+      'GET /',
+      'GET /health',
+      'GET /v1/models',
+      'POST /v1/chat/completions'
+    ]
   });
 });
 
