@@ -249,6 +249,7 @@ app.get('/health', (req, res) => {
     thinking_mode: ENABLE_THINKING_MODE
   });
 });
+
 // Catch-all for unsupported endpoints
 app.all('*', (req, res) => {
   res.status(404).json({
