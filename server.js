@@ -5,6 +5,8 @@ const cors = require('cors');
 const axios = require('axios');
 
 const app = express();
+app.set('trust proxy', true);
+
 const PORT = process.env.PORT || 3000;
 
 // ===============================
@@ -14,16 +16,11 @@ const PORT = process.env.PORT || 3000;
 const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
-// Shows/hides reasoning in output
 const SHOW_REASONING = false;
-
-// Enables thinking for specific models that support it
 const ENABLE_THINKING_MODE = false;
 
-// Default model if client sends nothing
 const DEFAULT_OPENAI_MODEL = 'gpt-4o';
 
-// Model mapping
 const MODEL_MAPPING = {
   'gpt-3.5-turbo': 'nvidia/llama-3.1-nemotron-ultra-253b-v1',
   'gpt-4': 'qwen/qwen3-coder-480b-a35b-instruct',
@@ -35,7 +32,7 @@ const MODEL_MAPPING = {
 };
 
 // ===============================
-// Startup logging
+// Logging
 // ===============================
 
 console.log('Starting OpenAI to NVIDIA NIM Proxy...');
@@ -54,12 +51,11 @@ app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-// JSON/body parser error handler
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
     return res.status(413).json({
       error: {
-        message: 'Request body too large. Reduce the prompt/context size or increase server limits.',
+        message: 'Request body too large. Reduce the prompt/context size.',
         type: 'invalid_request_error',
         code: 413
       }
@@ -85,30 +81,7 @@ app.use((err, req, res, next) => {
 
 function getNimModel(openaiModel) {
   const requestedModel = openaiModel || DEFAULT_OPENAI_MODEL;
-
-  if (MODEL_MAPPING[requestedModel]) {
-    return MODEL_MAPPING[requestedModel];
-  }
-
-  const modelLower = String(requestedModel).toLowerCase();
-
-  if (
-    modelLower.includes('gpt-4') ||
-    modelLower.includes('claude-opus') ||
-    modelLower.includes('405b')
-  ) {
-    return 'meta/llama-3.1-405b-instruct';
-  }
-
-  if (
-    modelLower.includes('claude') ||
-    modelLower.includes('gemini') ||
-    modelLower.includes('70b')
-  ) {
-    return 'meta/llama-3.1-70b-instruct';
-  }
-
-  return 'meta/llama-3.1-8b-instruct';
+  return MODEL_MAPPING[requestedModel] || MODEL_MAPPING[DEFAULT_OPENAI_MODEL];
 }
 
 function cleanUndefined(obj) {
@@ -121,8 +94,10 @@ function getErrorMessage(error) {
   const data = error.response?.data;
 
   if (typeof data === 'string') {
-    if (data.trim().startsWith('<!DOCTYPE') || data.trim().startsWith('<html')) {
-      return 'Upstream returned HTML instead of JSON. Check NIM_API_BASE, API key, or upstream availability.';
+    const trimmed = data.trim();
+
+    if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
+      return 'Upstream returned HTML instead of JSON. Check NIM_API_BASE, API key, or NVIDIA NIM availability.';
     }
 
     return data.slice(0, 500);
@@ -137,7 +112,7 @@ function getErrorMessage(error) {
 }
 
 // ===============================
-// Root endpoint
+// Root endpoints
 // ===============================
 
 app.get('/', (req, res) => {
@@ -167,7 +142,7 @@ app.get('/v1', (req, res) => {
 });
 
 // ===============================
-// Health check endpoint
+// Health endpoint
 // ===============================
 
 app.get('/health', (req, res) => {
@@ -182,7 +157,7 @@ app.get('/health', (req, res) => {
 });
 
 // ===============================
-// OpenAI-compatible models endpoint
+// Models endpoint
 // ===============================
 
 app.get('/v1/models', (req, res) => {
@@ -200,7 +175,7 @@ app.get('/v1/models', (req, res) => {
 });
 
 // ===============================
-// OpenAI-compatible chat completions endpoint
+// Chat completions endpoint
 // ===============================
 
 app.post('/v1/chat/completions', async (req, res) => {
@@ -307,9 +282,7 @@ app.post('/v1/chat/completions', async (req, res) => {
         buffer = lines.pop() || '';
 
         for (const line of lines) {
-          if (!line.startsWith('data: ')) {
-            continue;
-          }
+          if (!line.startsWith('data: ')) continue;
 
           if (line.includes('[DONE]')) {
             res.write('data: [DONE]\n\n');
@@ -422,10 +395,30 @@ app.post('/v1/chat/completions', async (req, res) => {
 });
 
 // ===============================
+// Legacy completions compatibility
+// ===============================
+
+app.post('/v1/completions', async (req, res) => {
+  const prompt = req.body?.prompt;
+
+  req.body = {
+    model: req.body?.model || DEFAULT_OPENAI_MODEL,
+    messages: [
+      {
+        role: 'user',
+        content: Array.isArray(prompt) ? prompt.join('\n') : String(prompt || '')
+      }
+    ],
+    temperature: req.body?.temperature,
+    max_tokens: req.body?.max_tokens,
+    stream: req.body?.stream
+  };
+
+  app._router.handle(req, res, () => {});
+});
+
+// ===============================
 // Catch-all endpoint
-// IMPORTANT:
-// Do not use app.all('*') here.
-// Express 5 can crash with wildcard route patterns.
 // ===============================
 
 app.use((req, res) => {
@@ -436,12 +429,13 @@ app.use((req, res) => {
       code: 404
     },
     available_endpoints: [
-  'GET /',
-  'GET /v1',
-  'GET /health',
-  'GET /v1/models',
-  'POST /v1/chat/completions'
-],
+      'GET /',
+      'GET /v1',
+      'GET /health',
+      'GET /v1/models',
+      'POST /v1/chat/completions',
+      'POST /v1/completions'
+    ],
     openai_base_url: `${req.protocol}://${req.get('host')}/v1`
   });
 });
