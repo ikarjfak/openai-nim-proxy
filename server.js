@@ -13,34 +13,49 @@ const PORT = process.env.PORT || 3000;
 // Config
 // ===============================
 
-const NIM_API_BASE = process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1';
+const NIM_API_BASE = (process.env.NIM_API_BASE || 'https://integrate.api.nvidia.com/v1').replace(/\/$/, '');
 const NIM_API_KEY = process.env.NIM_API_KEY;
 
+// Faster default model
+const DEFAULT_OPENAI_MODEL = 'gpt-4o';
+const DEFAULT_NIM_MODEL = process.env.DEFAULT_NIM_MODEL || 'deepseek-ai/deepseek-v4-flash';
+
+// Lower default output to reduce timeouts
+const DEFAULT_MAX_TOKENS = Number(process.env.DEFAULT_MAX_TOKENS || 500);
+
+// Keep recent conversation only to reduce slow requests
+const MAX_MESSAGES = Number(process.env.MAX_MESSAGES || 12);
+
+// Longer upstream timeout
+const UPSTREAM_TIMEOUT_MS = Number(process.env.UPSTREAM_TIMEOUT_MS || 300000);
+
+// Reasoning options
 const SHOW_REASONING = false;
 const ENABLE_THINKING_MODE = false;
 
-const DEFAULT_OPENAI_MODEL = 'gpt-4o';
-
+// OpenAI-compatible name -> NVIDIA NIM model name
 const MODEL_MAPPING = {
-  'gpt-3.5-turbo': 'meta/llama-3.1-8b-instruct',
-  'gpt-4': 'meta/llama-3.1-70b-instruct',
-  'gpt-4-turbo': 'meta/llama-3.1-70b-instruct',
-  'gpt-4o': 'meta/llama-3.1-70b-instruct',
-  'claude-3-opus': 'meta/llama-3.1-70b-instruct',
-  'claude-3-sonnet': 'meta/llama-3.1-8b-instruct',
-  'gemini-pro': 'meta/llama-3.1-70b-instruct'
+  'gpt-3.5-turbo': 'deepseek-ai/deepseek-v4-flash',
+  'gpt-4': 'deepseek-ai/deepseek-v4-flash',
+  'gpt-4-turbo': 'deepseek-ai/deepseek-v4-flash',
+  'gpt-4o': 'deepseek-ai/deepseek-v4-flash',
+  'claude-3-opus': 'deepseek-ai/deepseek-v4-flash',
+  'claude-3-sonnet': 'deepseek-ai/deepseek-v4-flash',
+  'gemini-pro': 'deepseek-ai/deepseek-v4-flash'
 };
 
 // ===============================
-// Logging
+// Startup logging
 // ===============================
 
 console.log('Starting OpenAI to NVIDIA NIM Proxy...');
 console.log('PORT:', PORT);
 console.log('NIM_API_BASE:', NIM_API_BASE);
 console.log('NIM_API_KEY exists:', Boolean(NIM_API_KEY));
-console.log('Reasoning display:', SHOW_REASONING ? 'ENABLED' : 'DISABLED');
-console.log('Thinking mode:', ENABLE_THINKING_MODE ? 'ENABLED' : 'DISABLED');
+console.log('DEFAULT_NIM_MODEL:', DEFAULT_NIM_MODEL);
+console.log('DEFAULT_MAX_TOKENS:', DEFAULT_MAX_TOKENS);
+console.log('MAX_MESSAGES:', MAX_MESSAGES);
+console.log('UPSTREAM_TIMEOUT_MS:', UPSTREAM_TIMEOUT_MS);
 
 // ===============================
 // Middleware
@@ -51,6 +66,7 @@ app.use(cors());
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+// JSON/body parser error handler
 app.use((err, req, res, next) => {
   if (err.type === 'entity.too.large') {
     return res.status(413).json({
@@ -79,9 +95,13 @@ app.use((err, req, res, next) => {
 // Helpers
 // ===============================
 
+function getBaseUrl(req) {
+  return `${req.protocol}://${req.get('host')}`;
+}
+
 function getNimModel(openaiModel) {
   const requestedModel = openaiModel || DEFAULT_OPENAI_MODEL;
-  return MODEL_MAPPING[requestedModel] || MODEL_MAPPING[DEFAULT_OPENAI_MODEL];
+  return MODEL_MAPPING[requestedModel] || DEFAULT_NIM_MODEL;
 }
 
 function cleanUndefined(obj) {
@@ -90,17 +110,44 @@ function cleanUndefined(obj) {
   );
 }
 
-function getErrorMessage(error) {
+function limitMessages(messages) {
+  if (!Array.isArray(messages)) return [];
+  return messages.slice(-MAX_MESSAGES);
+}
+
+function isHtml(data) {
+  if (typeof data !== 'string') return false;
+  const trimmed = data.trim().toLowerCase();
+  return trimmed.startsWith('<!doctype') || trimmed.startsWith('<html');
+}
+
+function getUpstreamErrorMessage(response) {
+  const data = response?.data;
+
+  if (typeof data === 'string') {
+    if (isHtml(data)) {
+      return 'NVIDIA returned HTML instead of JSON. Check NIM_API_BASE, API key, model name, or upstream availability.';
+    }
+
+    return data.slice(0, 1000);
+  }
+
+  return (
+    data?.error?.message ||
+    data?.message ||
+    `NVIDIA NIM returned status ${response?.status || 'unknown'}`
+  );
+}
+
+function getCaughtErrorMessage(error) {
   const data = error.response?.data;
 
   if (typeof data === 'string') {
-    const trimmed = data.trim();
-
-    if (trimmed.startsWith('<!DOCTYPE') || trimmed.startsWith('<html')) {
-      return 'Upstream returned HTML instead of JSON. Check NIM_API_BASE, API key, or NVIDIA NIM availability.';
+    if (isHtml(data)) {
+      return 'Upstream returned HTML instead of JSON. Check NIM_API_BASE, API key, model name, or NVIDIA NIM availability.';
     }
 
-    return data.slice(0, 500);
+    return data.slice(0, 1000);
   }
 
   return (
@@ -119,12 +166,14 @@ app.get('/', (req, res) => {
   res.json({
     status: 'ok',
     service: 'OpenAI to NVIDIA NIM Proxy',
-    openai_base_url: `${req.protocol}://${req.get('host')}/v1`,
+    openai_base_url: `${getBaseUrl(req)}/v1`,
     endpoints: {
       v1: '/v1',
       health: '/health',
       models: '/v1/models',
-      chat_completions: '/v1/chat/completions'
+      chat_completions: '/v1/chat/completions',
+      legacy_completions: '/v1/completions',
+      test_chat: '/test-chat'
     }
   });
 });
@@ -136,7 +185,8 @@ app.get('/v1', (req, res) => {
     message: 'Use /v1/models or /v1/chat/completions',
     endpoints: {
       models: '/v1/models',
-      chat_completions: '/v1/chat/completions'
+      chat_completions: '/v1/chat/completions',
+      legacy_completions: '/v1/completions'
     }
   });
 });
@@ -151,6 +201,10 @@ app.get('/health', (req, res) => {
     service: 'OpenAI to NVIDIA NIM Proxy',
     nim_api_base: NIM_API_BASE,
     nim_api_key_configured: Boolean(NIM_API_KEY),
+    default_nim_model: DEFAULT_NIM_MODEL,
+    default_max_tokens: DEFAULT_MAX_TOKENS,
+    max_messages: MAX_MESSAGES,
+    upstream_timeout_ms: UPSTREAM_TIMEOUT_MS,
     reasoning_display: SHOW_REASONING,
     thinking_mode: ENABLE_THINKING_MODE
   });
@@ -175,10 +229,10 @@ app.get('/v1/models', (req, res) => {
 });
 
 // ===============================
-// Chat completions endpoint
+// Main chat handler
 // ===============================
 
-app.post('/v1/chat/completions', async (req, res) => {
+async function handleChatCompletion(req, res) {
   try {
     if (!NIM_API_KEY) {
       return res.status(500).json({
@@ -209,13 +263,15 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     const nimModel = getNimModel(model);
+    const limitedMessages = limitMessages(messages);
+    const shouldStream = Boolean(stream);
 
     const nimRequest = cleanUndefined({
       model: nimModel,
-      messages,
+      messages: limitedMessages,
       temperature: temperature ?? 0.6,
-      max_tokens: max_tokens ?? 1024,
-      stream: Boolean(stream)
+      max_tokens: max_tokens ?? DEFAULT_MAX_TOKENS,
+      stream: shouldStream
     });
 
     if (ENABLE_THINKING_MODE) {
@@ -225,7 +281,11 @@ app.post('/v1/chat/completions', async (req, res) => {
     }
 
     console.log(`Proxying model "${model}" -> "${nimModel}"`);
-    console.log(`Streaming: ${Boolean(stream)}`);
+    console.log(`Messages sent: ${limitedMessages.length}/${messages.length}`);
+    console.log(`Max tokens: ${nimRequest.max_tokens}`);
+    console.log(`Streaming: ${shouldStream}`);
+
+    const startTime = Date.now();
 
     const response = await axios.post(
       `${NIM_API_BASE}/chat/completions`,
@@ -234,32 +294,31 @@ app.post('/v1/chat/completions', async (req, res) => {
         headers: {
           Authorization: `Bearer ${NIM_API_KEY}`,
           'Content-Type': 'application/json',
-          Accept: stream ? 'text/event-stream' : 'application/json'
+          Accept: shouldStream ? 'text/event-stream' : 'application/json'
         },
-        responseType: stream ? 'stream' : 'json',
-        timeout: 120000,
+        responseType: shouldStream ? 'stream' : 'json',
+        timeout: UPSTREAM_TIMEOUT_MS,
         maxBodyLength: Infinity,
         maxContentLength: Infinity,
         validateStatus: () => true
       }
     );
 
+    console.log(`NIM initial response time: ${Date.now() - startTime}ms`);
+    console.log(`NIM status: ${response.status}`);
+
     if (response.status < 200 || response.status >= 300) {
       const contentType = response.headers?.['content-type'] || '';
 
       return res.status(response.status).json({
         error: {
-          message:
-            typeof response.data === 'string'
-              ? response.data.slice(0, 500)
-              : response.data?.error?.message ||
-                response.data?.message ||
-                `NVIDIA NIM returned status ${response.status}`,
+          message: getUpstreamErrorMessage(response),
           type: response.data?.error?.type || 'upstream_error',
           code: response.data?.error?.code || response.status
         },
         upstream_status: response.status,
-        upstream_content_type: contentType
+        upstream_content_type: contentType,
+        upstream_model: nimModel
       });
     }
 
@@ -267,7 +326,7 @@ app.post('/v1/chat/completions', async (req, res) => {
     // Streaming response
     // ===============================
 
-    if (stream) {
+    if (shouldStream) {
       res.setHeader('Content-Type', 'text/event-stream');
       res.setHeader('Cache-Control', 'no-cache');
       res.setHeader('Connection', 'keep-alive');
@@ -330,6 +389,7 @@ app.post('/v1/chat/completions', async (req, res) => {
       });
 
       response.data.on('end', () => {
+        console.log(`NIM stream completed in ${Date.now() - startTime}ms`);
         res.end();
       });
 
@@ -378,21 +438,29 @@ app.post('/v1/chat/completions', async (req, res) => {
       }
     };
 
-    res.json(openaiResponse);
+    console.log(`NIM full response completed in ${Date.now() - startTime}ms`);
+
+    return res.json(openaiResponse);
   } catch (error) {
     console.error('Proxy error:', error.message);
 
     const status = error.response?.status || 500;
 
-    res.status(status).json({
+    return res.status(status).json({
       error: {
-        message: getErrorMessage(error),
+        message: getCaughtErrorMessage(error),
         type: error.response?.data?.error?.type || 'invalid_request_error',
         code: error.response?.data?.error?.code || status
       }
     });
   }
-});
+}
+
+// ===============================
+// Chat completions endpoint
+// ===============================
+
+app.post('/v1/chat/completions', handleChatCompletion);
 
 // ===============================
 // Legacy completions compatibility
@@ -414,7 +482,28 @@ app.post('/v1/completions', async (req, res) => {
     stream: req.body?.stream
   };
 
-  app._router.handle(req, res, () => {});
+  return handleChatCompletion(req, res);
+});
+
+// ===============================
+// Browser test endpoint
+// Visit this in a browser to test the proxy
+// ===============================
+
+app.get('/test-chat', async (req, res) => {
+  req.body = {
+    model: 'gpt-4o',
+    messages: [
+      {
+        role: 'user',
+        content: 'Say hello in one short sentence.'
+      }
+    ],
+    max_tokens: 50,
+    stream: false
+  };
+
+  return handleChatCompletion(req, res);
 });
 
 // ===============================
@@ -432,11 +521,12 @@ app.use((req, res) => {
       'GET /',
       'GET /v1',
       'GET /health',
+      'GET /test-chat',
       'GET /v1/models',
       'POST /v1/chat/completions',
       'POST /v1/completions'
     ],
-    openai_base_url: `${req.protocol}://${req.get('host')}/v1`
+    openai_base_url: `${getBaseUrl(req)}/v1`
   });
 });
 
